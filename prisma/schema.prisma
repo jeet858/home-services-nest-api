@@ -1,0 +1,292 @@
+// Postgres port of the Mongoose models in ../src/models.
+// Refs become FKs, id arrays become m2m relations, embedded docs become flat columns.
+
+generator client {
+  provider            = "prisma-client"
+  output              = "../src/generated/prisma"
+  moduleFormat        = "cjs"
+  importFileExtension = "js" // compiled CJS output requires .js paths
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+enum Role {
+  client
+  admin
+}
+
+enum BookingStatus {
+  pending
+  confirmed
+  completed
+  cancelled
+}
+
+enum RatingStatus {
+  pending
+  approved
+  rejected
+}
+
+enum ProviderStatus {
+  active
+  inactive
+  suspended
+  pending
+  verification_pending
+}
+
+enum ExperienceUnit {
+  months
+  years
+}
+
+/// App users: OTP clients and admins share one table, as in Mongo.
+model User {
+  id          String   @id @default(uuid()) @db.Uuid
+  phoneNumber String   @unique
+  name        String?
+  email       String?
+  password    String
+  avatar      String?
+  role        Role     @default(client)
+  lastLogin   DateTime? // fix: was written by admin login but missing from the Mongo schema
+  createdAt   DateTime @default(now())
+
+  addresses         Address[]
+  bookings          Booking[]         @relation("BookingUser")
+  assignedBookings  Booking[]         @relation("BookingAssignedBy")
+  ratings           Rating[]          @relation("RatingUser")
+  reviewedRatings   Rating[]          @relation("RatingReviewedBy")
+  createdProviders  ServiceProvider[] @relation("ProviderCreatedBy")
+  verifiedProviders ServiceProvider[] @relation("ProviderVerifiedBy")
+
+  @@index([role, createdAt])
+  @@index([email])
+}
+
+/// Short-lived login OTPs.
+model Otp {
+  id          String   @id @default(uuid()) @db.Uuid
+  phoneNumber String
+  otp         String
+  expiresAt   DateTime
+
+  @@index([phoneNumber])
+}
+
+/// User addresses (replaces the never-maintained User.addresses array).
+model Address {
+  id          String   @id @default(uuid()) @db.Uuid
+  userId      String   @db.Uuid
+  houseNo     String?
+  street      String
+  fullAddress String?
+  landmark    String?
+  city        String
+  state       String
+  zip         String
+  country     String
+  lat         Float? // optional coordinates for map/geo features
+  lng         Float?
+  createdAt   DateTime @default(now())
+
+  user     User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  bookings Booking[]
+
+  @@index([userId, createdAt])
+}
+
+/// Top-level service catalogue entry.
+model Service {
+  id              String   @id @default(uuid()) @db.Uuid
+  name            String
+  description     String?
+  process         String?
+  originalPrice   Float
+  discountedPrice Float
+  duration        String
+  image           String?
+  createdAt       DateTime @default(now())
+
+  // Derived from Subservice.serviceId instead of the duplicated Mongo array.
+  subservices Subservice[]
+  bookings    Booking[]         @relation("BookingServices")
+  providers   ServiceProvider[] @relation("ProviderServices")
+  ratings     Rating[]
+}
+
+/// Sub-item of a service; this is what bookings and ratings target.
+model Subservice {
+  id              String   @id @default(uuid()) @db.Uuid
+  name            String
+  serviceId       String   @db.Uuid
+  description     String?
+  process         String?
+  image           String?
+  originalPrice   Float
+  discountedPrice Float
+  duration        String
+  createdAt       DateTime @default(now())
+
+  service   Service           @relation(fields: [serviceId], references: [id], onDelete: Cascade)
+  bookings  Booking[]         @relation("BookingSubservices")
+  providers ServiceProvider[] @relation("ProviderSubservices")
+  ratings   Rating[]
+
+  @@index([serviceId, createdAt])
+}
+
+/// Customer booking of one or more services/subservices.
+model Booking {
+  id                 String        @id @default(uuid()) @db.Uuid
+  userId             String        @db.Uuid
+  addressId          String?       @db.Uuid
+  serviceProviderId  String?       @db.Uuid
+  date               DateTime
+  time               String
+  status             BookingStatus @default(pending)
+  discount           Float         @default(0)
+  finalPrice         Float
+  assignedAt         DateTime?
+  assignedById       String?       @db.Uuid
+  cancellationReason String? // fix: cancel wrote these but the Mongo schema dropped them
+  cancelledAt        DateTime?
+  createdAt          DateTime      @default(now())
+
+  user            User             @relation("BookingUser", fields: [userId], references: [id], onDelete: Cascade)
+  address         Address?         @relation(fields: [addressId], references: [id], onDelete: SetNull)
+  serviceProvider ServiceProvider? @relation(fields: [serviceProviderId], references: [id], onDelete: SetNull)
+  assignedBy      User?            @relation("BookingAssignedBy", fields: [assignedById], references: [id], onDelete: SetNull)
+  services        Service[]        @relation("BookingServices")
+  subservices     Subservice[]     @relation("BookingSubservices")
+  ratings         Rating[]
+
+  @@index([userId, createdAt])
+  @@index([serviceProviderId, status])
+  @@index([createdAt])
+}
+
+/// One rating per (booking, subservice); reviewed by an admin before counting.
+model Rating {
+  id                String       @id @default(uuid()) @db.Uuid
+  bookingId         String       @db.Uuid
+  userId            String       @db.Uuid
+  // Nullable so deleting a provider keeps history; required on create in code.
+  serviceProviderId String?      @db.Uuid
+  subserviceId      String       @db.Uuid
+  serviceId         String       @db.Uuid
+  rating            Int
+  feedback          String
+  status            RatingStatus @default(pending)
+  reviewedById      String?      @db.Uuid
+  reviewedAt        DateTime?
+  reviewNote        String?
+  createdAt         DateTime     @default(now())
+  updatedAt         DateTime     @updatedAt
+
+  booking         Booking          @relation(fields: [bookingId], references: [id], onDelete: Cascade)
+  user            User             @relation("RatingUser", fields: [userId], references: [id], onDelete: Cascade)
+  serviceProvider ServiceProvider? @relation(fields: [serviceProviderId], references: [id], onDelete: SetNull)
+  subservice      Subservice       @relation(fields: [subserviceId], references: [id], onDelete: Restrict)
+  service         Service          @relation(fields: [serviceId], references: [id], onDelete: Restrict)
+  reviewedBy      User?            @relation("RatingReviewedBy", fields: [reviewedById], references: [id], onDelete: SetNull)
+
+  // fix: Mongo had unique(booking) while creating one rating per subservice, so multi-subservice bookings failed.
+  @@unique([bookingId, subserviceId])
+  @@index([userId, status])
+  @@index([subserviceId, status])
+  @@index([serviceId])
+  @@index([rating])
+  @@index([createdAt])
+}
+
+/// Field worker; aadhaarCard/panCard/bankDetails/rating subdocs are flattened into columns.
+model ServiceProvider {
+  id                    String         @id @default(uuid()) @db.Uuid
+  name                  String
+  email                 String         @unique
+  phoneNumber           String         @unique
+  address               String?
+  aadhaarNumber         String?        @unique
+  aadhaarImage          String?
+  aadhaarS3Key          String?
+  aadhaarVerified       Boolean        @default(false)
+  panNumber             String?        @unique // Postgres unique allows many NULLs, matching the partial index
+  panImage              String?
+  panS3Key              String?
+  panVerified           Boolean        @default(false)
+  passportPhoto         String?
+  passportPhotoS3Key    String?
+  specializations       String[]
+  experience            Float          @default(0)
+  experienceUnit        ExperienceUnit @default(years)
+  qualification         String?
+  // { monday: { start, end, available }, ... } — read as a whole, so JSON is enough.
+  availability          Json
+  status                ProviderStatus @default(verification_pending)
+  ratingAverage         Float          @default(0)
+  ratingTotal           Int            @default(0)
+  ratingCount1          Int            @default(0)
+  ratingCount2          Int            @default(0)
+  ratingCount3          Int            @default(0)
+  ratingCount4          Int            @default(0)
+  ratingCount5          Int            @default(0)
+  bankAccountNumber     String?
+  bankIfscCode          String?
+  bankAccountHolderName String?
+  bankName              String?
+  commission            Float          @default(10)
+  // Nullable so deleting an admin doesn't block; required on create in code.
+  createdById           String?        @db.Uuid
+  verifiedById          String?        @db.Uuid
+  verifiedAt            DateTime?
+  notes                 String?
+  createdAt             DateTime       @default(now())
+  updatedAt             DateTime       @updatedAt
+
+  services       Service[]               @relation("ProviderServices")
+  subservices    Subservice[]            @relation("ProviderSubservices")
+  certifications ProviderCertification[]
+  documents      ProviderDocument[]
+  bookings       Booking[]
+  ratings        Rating[]
+  createdBy      User?                   @relation("ProviderCreatedBy", fields: [createdById], references: [id], onDelete: SetNull)
+  verifiedBy     User?                   @relation("ProviderVerifiedBy", fields: [verifiedById], references: [id], onDelete: SetNull)
+
+  @@index([status])
+  @@index([ratingAverage(sort: Desc), ratingTotal(sort: Desc)])
+  @@index([createdAt(sort: Desc)])
+}
+
+/// Was ServiceProvider.certifications[] in Mongo.
+model ProviderCertification {
+  id                String    @id @default(uuid()) @db.Uuid
+  providerId        String    @db.Uuid
+  name              String
+  issuingAuthority  String
+  issueDate         DateTime?
+  expiryDate        DateTime?
+  certificateNumber String?
+
+  provider ServiceProvider @relation(fields: [providerId], references: [id], onDelete: Cascade)
+
+  @@index([providerId])
+}
+
+/// Was ServiceProvider.documents[] in Mongo.
+model ProviderDocument {
+  id         String   @id @default(uuid()) @db.Uuid
+  providerId String   @db.Uuid
+  type       String
+  name       String
+  url        String
+  uploadedAt DateTime @default(now())
+  verified   Boolean  @default(false)
+
+  provider ServiceProvider @relation(fields: [providerId], references: [id], onDelete: Cascade)
+
+  @@index([providerId])
+}
