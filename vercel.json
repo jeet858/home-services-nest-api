@@ -1,5 +1,6 @@
 {
   "version": 2,
+  "framework": null,
   "regions": ["bom1"],
   "buildCommand": "npm run vercel-build",
   "functions": {

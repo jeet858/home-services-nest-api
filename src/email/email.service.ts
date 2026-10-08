@@ -33,8 +33,8 @@ export class EmailService {
   // Never throws: email failures are logged so callers' requests still succeed.
   async send({ to, subject, html }: { to: string[]; subject: string; html: string }) {
     const { resendKey, from } = appConfig.email;
-    if (!resendKey) {
-      logger.warn('RESEND_KEY not set; skipping email', { subject });
+    if (!resendKey || !from) {
+      logger.warn('RESEND_KEY or RESEND_FROM not set; skipping email', { subject });
       return;
     }
 

@@ -36,16 +36,16 @@ export class AuthService {
       const message = `One-Time Password for confirming your phone number is ${otp}. Please do not share this OTP with anyone - SR Enterprise. Visit our website - https://www.subidha.net.in`;
 
       const OtpParams = new URLSearchParams({
-        username: appConfig.sms.username,
-        password: appConfig.sms.password,
+        username: appConfig.sms.username ?? '',
+        password: appConfig.sms.password ?? '',
         unicode: 'false',
-        from: appConfig.sms.from,
+        from: appConfig.sms.from ?? '',
         to: `${cleanedPhoneNumber}`,
         text: message,
-        dltContentId: appConfig.sms.dltContentId,
+        dltContentId: appConfig.sms.dltContentId ?? '',
       });
 
-      const apiUrl = `https://omni.myctrlbox.com/fe/api/v1/send?${OtpParams.toString()}`;
+      const apiUrl = `${appConfig.sms.apiUrl}?${OtpParams.toString()}`;
 
       // Replace any previous OTP for this number.
       await this.prisma.otp.deleteMany({ where: { phoneNumber: cleanedPhoneNumber } });

@@ -13,23 +13,24 @@ const appConfig = {
   supabase: {
     url: process.env.SUPABASE_URL,
     serviceRoleKey: process.env.SUPABASE_SERVICE_ROLE_KEY,
-    bucket: process.env.SUPABASE_BUCKET || 'homeservice',
+    bucket: process.env.SUPABASE_BUCKET,
   },
   database_url: process.env.DATABASE_URL,
   // fix: services defaulted to appConfig.pagination.defaultLimit, which was undefined
   pagination: { defaultLimit: 10 },
-  // Previously hardcoded in auth.service; fallbacks keep current behaviour until env is set.
+  // OTP SMS gateway (omni.myctrlbox.com).
   sms: {
-    username: process.env.SMS_USERNAME || 'srenterotp.trans',
-    password: process.env.SMS_PASSWORD || 'rm5d2',
-    from: process.env.SMS_FROM || 'SREN',
-    dltContentId: process.env.SMS_DLT_CONTENT_ID || '1707175247294315575',
+    apiUrl: process.env.SMS_API_URL,
+    username: process.env.SMS_USERNAME,
+    password: process.env.SMS_PASSWORD,
+    from: process.env.SMS_FROM,
+    dltContentId: process.env.SMS_DLT_CONTENT_ID,
   },
   // Resend transactional email; booking notifications go to the user plus bookingNotifyTo.
   email: {
     resendKey: process.env.RESEND_KEY,
-    from: process.env.RESEND_FROM || 'onboarding@resend.dev',
-    bookingNotifyTo: 'asyedsamser@gmail.com',
+    from: process.env.RESEND_FROM,
+    bookingNotifyTo: process.env.BOOKING_NOTIFY_EMAIL,
   },
 };
 
