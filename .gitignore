@@ -4,3 +4,6 @@ logs/
 src/generated/
 .env
 *.tsbuildinfo
+
+.vercel
+.env*
