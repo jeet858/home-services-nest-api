@@ -2,7 +2,8 @@
   "version": 2,
   "framework": null,
   "regions": ["bom1"],
-  "buildCommand": "npm run vercel-build",
+  "buildCommand": "npm run vercel-build && mkdir -p public",
+  "outputDirectory": "public",
   "functions": {
     "api/index.js": {
       "maxDuration": 30,
