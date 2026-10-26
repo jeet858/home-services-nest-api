@@ -1,6 +1,7 @@
 import { Injectable } from '@nestjs/common';
 import { DatabaseError, NotFoundError, ValidationError } from '../common/errors/app-errors';
 import { logger } from '../common/logger/logger';
+import { getOnboardingStep } from '../common/utils/onboarding';
 import { orNull } from '../common/utils/prisma-errors';
 import { pickFields } from '../common/validation/model-input';
 import { PrismaService } from '../prisma/prisma.service';
@@ -31,6 +32,15 @@ export class UserService {
         throw error;
       }
 
+      throw new DatabaseError('Failed to fetch user profile');
+    }
+  }
+
+  async getOnboardingStep(userId: string) {
+    try {
+      return await getOnboardingStep(this.prisma, userId);
+    } catch (error) {
+      logger.error('Error resolving onboarding step', { error: error.message, userId });
       throw new DatabaseError('Failed to fetch user profile');
     }
   }

@@ -4,6 +4,7 @@ import appConfig from '../config/app.config';
 import { DatabaseError, ValidationError } from '../common/errors/app-errors';
 import { logger } from '../common/logger/logger';
 import { generateOTP } from '../common/utils/generate-otp';
+import { getOnboardingStep } from '../common/utils/onboarding';
 import { PrismaService } from '../prisma/prisma.service';
 
 const JWT_SECRET = appConfig.JWT_SECRET;
@@ -64,16 +65,8 @@ export class AuthService {
       const responseData = await response.json();
       logger.info('OTP API response received', { responseData });
 
-      // First OTP for a number registers the client.
-      if (!user) {
-        const newUser = await this.prisma.user.create({
-          data: { phoneNumber: cleanedPhoneNumber, password: 'Not Required', role: 'client' },
-        });
-
-        logger.info('New user created', { phoneNumber: cleanedPhoneNumber, userId: newUser.id });
-      }
-
-      return { message: 'OTP sent successfully' };
+      // The account itself is created on verify, so unverified numbers leave no user row.
+      return { message: 'OTP sent successfully', isNewUser: !user };
     } catch (error) {
       logger.error('Error in generateAndSendOtp', { error: error.message, phoneNumber: userDetails?.phoneNumber });
 
@@ -113,11 +106,21 @@ export class AuthService {
         throw new ValidationError('OTP has expired');
       }
 
-      const user = await this.prisma.user.findUnique({ where: { phoneNumber: cleanedPhoneNumber } });
+      let user = await this.prisma.user.findUnique({ where: { phoneNumber: cleanedPhoneNumber } });
+      const isNewUser = !user;
 
+      // First verified OTP for a number registers the client.
       if (!user) {
-        throw new ValidationError('User not found');
+        user = await this.prisma.user.upsert({
+          where: { phoneNumber: cleanedPhoneNumber },
+          update: {},
+          create: { phoneNumber: cleanedPhoneNumber, password: 'Not Required', role: 'client' },
+        });
+
+        logger.info('New user created', { phoneNumber: cleanedPhoneNumber, userId: user.id });
       }
+
+      const onboardingStep = await getOnboardingStep(this.prisma, user.id);
 
       // Same payload as before: no role and no expiry (flagged in PORTING_NOTES).
       const token = jwt.sign({ id: user.id, phoneNumber: user.phoneNumber }, JWT_SECRET);
@@ -130,6 +133,8 @@ export class AuthService {
         message: 'OTP verified successfully',
         user: { id: user.id, name: user.name, phoneNumber: user.phoneNumber, email: user.email },
         token,
+        isNewUser,
+        onboardingStep,
       };
     } catch (error) {
       logger.error('Failed to verify OTP', { error: error.message, phoneNumber: userDetails?.phoneNumber });

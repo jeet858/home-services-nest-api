@@ -17,8 +17,9 @@ export class UserController {
     logger.info('Getting user profile', { userId });
 
     const user = await this.userService.getUser(userId);
+    const onboardingStep = await this.userService.getOnboardingStep(userId);
 
-    res.status(200).json({ status: 'success', data: { user } });
+    res.status(200).json({ status: 'success', data: { user, onboardingStep } });
   }
 
   @Put('profile')
