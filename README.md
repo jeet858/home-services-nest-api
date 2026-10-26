@@ -20,6 +20,24 @@ For development, use `npm run start:dev` (watch mode). Use `npm run db:migrate:d
 
 Uploads (Aadhaar, PAN, passport photo; JPEG/PNG/WebP up to 5MB) are buffered in memory, pushed to the bucket, and their public URL is stored on the provider. The app boots without these variables; only uploads fail, with `400 File upload failed: …`.
 
+## Coupons, payments and booking tracking
+
+```bash
+npm run seed:coupons          # SUBIDHA30, WELCOME100, PAYTM15, FESTIVE50 (safe to re-run)
+```
+
+- `GET /api/coupons` is public. `POST /api/coupons/validate` (`{ code, amount }`) returns `{ coupon, discount }`. Admins can `POST`, `PUT /:id` and `DELETE /:id`.
+- Online payments need `RAZORPAY_KEY_ID` and `RAZORPAY_KEY_SECRET`. `POST /api/payments/order` (`{ amount }` in rupees) returns `{ orderId, amount, currency, keyId }`; `POST /api/payments/verify` checks `{ orderId, paymentId, signature }`.
+- `POST /api/booking` also takes:
+  - `couponCode` and `itemTotal`: the server re-validates the coupon and recomputes `discount` and `finalPrice`.
+  - `paymentMethod` (`online` | `cash`) and `notes`.
+  - For online payments, `razorpayOrderId`, `razorpayPaymentId` and `razorpaySignature`. The signature is verified before the booking is saved with `paymentStatus: paid`.
+- Each booking gets a 4-digit `serviceOtp`, which the customer shares with the pro.
+- `POST /api/booking/my-bookings/:id/tip` (`{ amount }`) records a tip.
+- Admin progress updates for the tracking screen:
+  - `PATCH /api/booking/:id/start` (`{ otp }`) sets `startedAt`.
+  - `PATCH /api/booking/:id/status` (`{ status }`) sets `completedAt` on completion and marks cash bookings paid.
+
 ## Moving the data from MongoDB
 
 ```bash

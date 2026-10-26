@@ -32,6 +32,11 @@ const appConfig = {
     from: process.env.RESEND_FROM,
     bookingNotifyTo: process.env.BOOKING_NOTIFY_EMAIL,
   },
+  // Razorpay orders + signature verification for online booking payments.
+  razorpay: {
+    keyId: process.env.RAZORPAY_KEY_ID,
+    keySecret: process.env.RAZORPAY_KEY_SECRET,
+  },
 };
 
 export default appConfig;

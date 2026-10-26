@@ -43,6 +43,22 @@ enum ExperienceUnit {
   years
 }
 
+enum CouponType {
+  percent
+  flat
+  cashback
+}
+
+enum PaymentMethod {
+  online
+  cash
+}
+
+enum PaymentStatus {
+  pending
+  paid
+}
+
 /// App users: OTP clients and admins share one table, as in Mongo.
 model User {
   id          String   @id @default(uuid()) @db.Uuid
@@ -81,6 +97,7 @@ model Otp {
 model Address {
   id          String   @id @default(uuid()) @db.Uuid
   userId      String   @db.Uuid
+  label       String? // Home / Office / Other
   houseNo     String?
   street      String
   fullAddress String?
@@ -154,6 +171,17 @@ model Booking {
   assignedById       String?       @db.Uuid
   cancellationReason String? // fix: cancel wrote these but the Mongo schema dropped them
   cancelledAt        DateTime?
+  couponCode         String?
+  paymentMethod      PaymentMethod @default(cash)
+  paymentStatus      PaymentStatus @default(pending)
+  razorpayOrderId    String?
+  razorpayPaymentId  String?
+  // Shared with the pro on arrival to start the job.
+  serviceOtp         String?
+  notes              String?
+  tip                Float         @default(0)
+  startedAt          DateTime?
+  completedAt        DateTime?
   createdAt          DateTime      @default(now())
 
   user            User             @relation("BookingUser", fields: [userId], references: [id], onDelete: Cascade)
@@ -289,4 +317,23 @@ model ProviderDocument {
   provider ServiceProvider @relation(fields: [providerId], references: [id], onDelete: Cascade)
 
   @@index([providerId])
+}
+
+/// Promo codes shown on the Offers screen and applied at checkout.
+model Coupon {
+  id           String     @id @default(uuid()) @db.Uuid
+  code         String     @unique
+  title        String
+  description  String?
+  tag          String?
+  type         CouponType
+  value        Float
+  maxDiscount  Float?
+  minOrder     Float      @default(0)
+  validTill    DateTime?
+  perUserLimit Int?
+  active       Boolean    @default(true)
+  createdAt    DateTime   @default(now())
+
+  @@index([active, validTill])
 }

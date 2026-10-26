@@ -3,7 +3,9 @@ import { AddressModule } from './address/address.module';
 import { AdminModule } from './admin/admin.module';
 import { AuthModule } from './auth/auth.module';
 import { BookingModule } from './booking/booking.module';
+import { CouponModule } from './coupon/coupon.module';
 import { HealthModule } from './health/health.module';
+import { PaymentModule } from './payment/payment.module';
 import { RatingModule } from './rating/rating.module';
 import { ServiceProviderModule } from './service-provider/service-provider.module';
 import { ServiceModule } from './service/service.module';
@@ -25,6 +27,8 @@ import { PrismaModule } from './prisma/prisma.module';
     BookingModule,
     RatingModule,
     ServiceProviderModule,
+    CouponModule,
+    PaymentModule,
   ],
 })
 export class AppModule {}

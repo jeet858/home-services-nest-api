@@ -14,6 +14,7 @@
     "db:migrate": "prisma migrate deploy",
     "db:migrate:dev": "prisma migrate dev && prisma generate",
     "migrate:mongo": "tsx scripts/migrate-mongo-to-postgres.ts",
+    "seed:coupons": "tsx scripts/seed-coupons.ts",
     "check:circular": "madge --circular --extensions ts --exclude generated src",
     "vercel-build": "prisma generate && nest build"
   },

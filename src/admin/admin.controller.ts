@@ -20,6 +20,16 @@ export class AdminController {
     res.status(200).json({ status: 'success', data: { admin: result.admin, token: result.token } });
   }
 
+  @Get('stats')
+  @AdminOnly()
+  async getStats(@Res() res: Response) {
+    logger.info('Getting admin dashboard stats');
+
+    const stats = await this.adminService.getStats();
+
+    res.status(200).json({ status: 'success', data: stats });
+  }
+
   @Post('admins')
   @AdminOnly()
   async createAdmin(@Req() req: Request, @Res() res: Response) {
@@ -95,9 +105,10 @@ export class AdminController {
   async getAllUsers(@Req() req: Request, @Res() res: Response) {
     const page = parseInt(req.query.page as string) || 1;
     const limit = parseInt(req.query.limit as string) || 10;
-    logger.info('Getting all users', { page, limit });
+    const search = typeof req.query.search === 'string' ? req.query.search : undefined;
+    logger.info('Getting all users', { page, limit, search });
 
-    const result = await this.adminService.getAllUsers(page, limit);
+    const result = await this.adminService.getAllUsers(page, limit, search);
 
     res.status(200).json({
       status: 'success',

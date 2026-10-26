@@ -114,7 +114,42 @@ export class BookingController {
     res.status(200).json({ status: 'success', data: { booking } });
   }
 
+  @Post('my-bookings/:id/tip')
+  async addTip(@Req() req: Request, @Res() res: Response) {
+    const { id } = req.params;
+    const userId = req.user.id;
+    logger.info('Adding tip to booking', { bookingId: id, userId });
+    assertUuid(id, 'booking');
+
+    const booking = await this.bookingService.addTip(id, req.body.amount, userId);
+
+    res.status(200).json({ status: 'success', data: { booking } });
+  }
+
   // ---- Admin routes ----
+
+  @Patch(':id/status')
+  @UseGuards(AdminGuard)
+  async updateStatus(@Req() req: Request, @Res() res: Response) {
+    const { id } = req.params;
+    assertUuid(id, 'booking');
+
+    const booking = await this.bookingService.updateStatus(id, req.body.status, req.body.reason);
+
+    res.status(200).json({ status: 'success', data: { booking } });
+  }
+
+  // Ops marks the job started once the pro enters the customer's service OTP.
+  @Patch(':id/start')
+  @UseGuards(AdminGuard)
+  async markStarted(@Req() req: Request, @Res() res: Response) {
+    const { id } = req.params;
+    assertUuid(id, 'booking');
+
+    const booking = await this.bookingService.markStarted(id, req.body.otp);
+
+    res.status(200).json({ status: 'success', data: { booking } });
+  }
 
   @Get()
   @UseGuards(AdminGuard)
@@ -122,9 +157,21 @@ export class BookingController {
     const page = parseInt(req.query.page as string) || 1;
     const limit = parseInt(req.query.limit as string) || 10;
 
-    logger.info('Getting all bookings', { page, limit });
+    const q = req.query as Record<string, string | undefined>;
+    const filters = {
+      status: q.status,
+      paymentStatus: q.paymentStatus,
+      from: q.from,
+      to: q.to,
+      unassigned: q.unassigned === 'true',
+      userId: q.userId,
+      providerId: q.providerId,
+      search: q.search,
+    };
 
-    const result = await this.bookingService.getAllBookings(page, limit);
+    logger.info('Getting all bookings', { page, limit, filters });
+
+    const result = await this.bookingService.getAllBookings(page, limit, filters);
 
     res.status(200).json({
       status: 'success',

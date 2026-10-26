@@ -7,6 +7,7 @@ import { FieldSpec, pickFields, requireFields } from '../common/validation/model
 import { PrismaService } from '../prisma/prisma.service';
 
 const ADDRESS_FIELDS: FieldSpec = {
+  label: 'string', // Home / Office / Other, shown in the app's address pickers
   houseNo: 'string',
   street: 'string',
   fullAddress: 'string',

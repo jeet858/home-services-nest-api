@@ -1,11 +1,15 @@
 import { Injectable } from '@nestjs/common';
+import { randomInt } from 'crypto';
 import appConfig from '../config/app.config';
 import {
   AuthenticationError,
   DatabaseError,
+  ExternalServiceError,
   NotFoundError,
   ValidationError,
 } from '../common/errors/app-errors';
+import { CouponService } from '../coupon/coupon.service';
+import { PaymentService } from '../payment/payment.service';
 import { logger } from '../common/logger/logger';
 import { EmailService } from '../email/email.service';
 import { isUuid } from '../common/utils/ids';
@@ -33,6 +37,7 @@ const PROVIDER_SUMMARY = {
 };
 // Subservice `price` was selected but never existed, so only real fields are returned.
 const FULL_INCLUDE = {
+  user: { select: { id: true, name: true, phoneNumber: true, email: true } },
   services: SUMMARY,
   subservices: SUMMARY,
   address: true,
@@ -42,15 +47,35 @@ const FULL_INCLUDE = {
 const EDIT_INCLUDE = { services: SUMMARY, subservices: SUMMARY, address: true } satisfies Prisma.BookingInclude;
 
 const STATUSES = ['pending', 'confirmed', 'completed', 'cancelled'];
-const USER_FIELDS: FieldSpec = { addressId: 'string', date: 'date', time: 'string', discount: 'number', finalPrice: 'number' };
+const USER_FIELDS: FieldSpec = {
+  addressId: 'string',
+  date: 'date',
+  time: 'string',
+  discount: 'number',
+  finalPrice: 'number',
+  notes: 'string',
+};
 // fix: only admins may set provider assignment fields (users could previously $set any field).
 const ADMIN_FIELDS: FieldSpec = { ...USER_FIELDS, status: 'string', serviceProviderId: 'string', assignedAt: 'date', assignedBy: 'string' };
+
+export interface BookingFilters {
+  status?: string;
+  paymentStatus?: string;
+  from?: string;
+  to?: string;
+  unassigned?: boolean;
+  userId?: string;
+  providerId?: string;
+  search?: string;
+}
 
 @Injectable()
 export class BookingService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly emailService: EmailService,
+    private readonly couponService: CouponService,
+    private readonly paymentService: PaymentService,
   ) {}
 
   // Same existence checks as before; non-UUID ids count as "not found" (Mongo cast errors became 500s).
@@ -94,19 +119,55 @@ export class BookingService {
     return data;
   }
 
-  async getAllBookings(page = 1, limit = appConfig.pagination.defaultLimit) {
+  // Admin list filters; every key is optional and combined with AND.
+  private toBookingWhere(filters: BookingFilters): Prisma.BookingWhereInput {
+    const where: Prisma.BookingWhereInput = {};
+    if (filters.status) {
+      if (!STATUSES.includes(filters.status)) throw new ValidationError(`Status must be one of ${STATUSES.join(', ')}`);
+      where.status = filters.status as any;
+    }
+    if (filters.paymentStatus) {
+      if (!['pending', 'paid'].includes(filters.paymentStatus)) throw new ValidationError('Payment status must be pending or paid');
+      where.paymentStatus = filters.paymentStatus as any;
+    }
+    const from = filters.from ? new Date(filters.from) : undefined;
+    const to = filters.to ? new Date(filters.to) : undefined;
+    if ((from && Number.isNaN(from.getTime())) || (to && Number.isNaN(to.getTime()))) {
+      throw new ValidationError('Invalid date filter');
+    }
+    if (from || to) where.date = { ...(from && { gte: from }), ...(to && { lte: to }) };
+    if (filters.unassigned) where.serviceProviderId = null;
+    for (const [key, label] of [['userId', 'user'], ['providerId', 'service provider']] as const) {
+      if (filters[key] && !isUuid(filters[key])) throw new ValidationError(`Invalid ${label} id`);
+    }
+    if (filters.userId) where.userId = filters.userId;
+    if (filters.providerId) where.serviceProviderId = filters.providerId;
+    const search = filters.search?.trim();
+    if (search) {
+      where.OR = [
+        { user: { name: { contains: search, mode: 'insensitive' } } },
+        { user: { phoneNumber: { contains: search } } },
+        ...(isUuid(search) ? [{ id: search }] : []),
+      ];
+    }
+    return where;
+  }
+
+  async getAllBookings(page = 1, limit = appConfig.pagination.defaultLimit, filters: BookingFilters = {}) {
+    const where = this.toBookingWhere(filters);
     try {
-      logger.info('Admin: Fetching all bookings', { page, limit });
+      logger.info('Admin: Fetching all bookings', { page, limit, filters });
 
       const skip = (page - 1) * limit;
       const bookings = await this.prisma.booking.findMany({
+        where,
         include: FULL_INCLUDE,
         orderBy: { createdAt: 'desc' },
         skip,
         take: limit,
       });
 
-      const total = await this.prisma.booking.count();
+      const total = await this.prisma.booking.count({ where });
 
       logger.info('Admin: Bookings fetched successfully', { count: bookings.length, total, page, limit });
 
@@ -205,11 +266,34 @@ export class BookingService {
       const data = await this.toBookingData(bookingData, false);
       requireFields(data, ['date', 'time', 'finalPrice'], 'Booking');
 
+      // Re-validate the applied coupon so the discount can't be inflated client-side.
+      if (bookingData.couponCode) {
+        const clientDiscount = data.discount ?? 0;
+        const itemTotal = Number(bookingData.itemTotal ?? data.finalPrice + clientDiscount);
+        const { coupon, discount } = await this.couponService.validate(bookingData.couponCode, itemTotal, userId);
+        data.couponCode = coupon.code;
+        data.discount = discount;
+        data.finalPrice = Math.max(0, data.finalPrice + clientDiscount - discount);
+      }
+
+      const paymentMethod = bookingData.paymentMethod === 'online' ? 'online' : 'cash';
+      let paymentStatus: 'pending' | 'paid' = 'pending';
+      if (paymentMethod === 'online') {
+        const { razorpayOrderId, razorpayPaymentId, razorpaySignature } = bookingData;
+        this.paymentService.verify(razorpayOrderId, razorpayPaymentId, razorpaySignature);
+        data.razorpayOrderId = razorpayOrderId;
+        data.razorpayPaymentId = razorpayPaymentId;
+        paymentStatus = 'paid';
+      }
+
       const booking = await this.prisma.booking.create({
         data: {
           ...(data as any),
           userId,
           status: 'pending',
+          paymentMethod,
+          paymentStatus,
+          serviceOtp: String(randomInt(1000, 10000)),
           services: { connect: [...new Set<string>(bookingData.services)].map((id) => ({ id })) },
           subservices: { connect: [...new Set<string>(bookingData.subservices)].map((id) => ({ id })) },
         },
@@ -226,12 +310,62 @@ export class BookingService {
     } catch (error) {
       logger.error('Error creating booking', { error: error.message, userId });
 
-      if (error instanceof ValidationError || error instanceof NotFoundError) {
+      if (error instanceof ValidationError || error instanceof NotFoundError || error instanceof ExternalServiceError) {
         throw error;
       }
 
       throw new DatabaseError('Failed to create booking');
     }
+  }
+
+  async addTip(bookingId: string, amount: any, userId: string) {
+    const tip = Number(amount);
+    if (Number.isNaN(tip) || tip < 0) throw new ValidationError('A valid tip amount is required');
+
+    const existingBooking = await this.prisma.booking.findUnique({ where: { id: bookingId } });
+    if (!existingBooking) throw new NotFoundError('Booking not found');
+    if (existingBooking.userId !== userId) throw new AuthenticationError('Not authorized to tip on this booking');
+
+    logger.info('User: Adding tip', { bookingId, userId, tip });
+    return this.prisma.booking.update({ where: { id: bookingId }, data: { tip }, include: EDIT_INCLUDE });
+  }
+
+  // Admin/ops progress updates; stamps the timeline fields the tracking screen reads.
+  async updateStatus(bookingId: string, status: any, reason?: any) {
+    if (!STATUSES.includes(status)) throw new ValidationError(`Status must be one of ${STATUSES.join(', ')}`);
+
+    const existingBooking = await this.prisma.booking.findUnique({ where: { id: bookingId } });
+    if (!existingBooking) throw new NotFoundError('Booking not found');
+
+    // startedAt is stamped by markStarted (OTP check); here it's only backfilled on completion.
+    const data: Prisma.BookingUpdateInput = { status };
+    if (status === 'completed') {
+      data.completedAt = new Date();
+      data.startedAt = existingBooking.startedAt ?? new Date();
+      if (existingBooking.paymentMethod === 'cash') data.paymentStatus = 'paid';
+    }
+    if (status === 'cancelled') {
+      data.cancelledAt = new Date();
+      if (typeof reason === 'string' && reason.trim()) data.cancellationReason = reason.trim();
+    }
+
+    logger.info('Admin: Updating booking status', { bookingId, status });
+    return this.prisma.booking.update({ where: { id: bookingId }, data, include: FULL_INCLUDE });
+  }
+
+  async markStarted(bookingId: string, otp: any) {
+    const existingBooking = await this.prisma.booking.findUnique({ where: { id: bookingId } });
+    if (!existingBooking) throw new NotFoundError('Booking not found');
+    if (existingBooking.serviceOtp && String(otp) !== existingBooking.serviceOtp) {
+      throw new ValidationError('Invalid service OTP');
+    }
+
+    logger.info('Admin: Marking booking started', { bookingId });
+    return this.prisma.booking.update({
+      where: { id: bookingId },
+      data: { status: 'confirmed', startedAt: new Date() },
+      include: FULL_INCLUDE,
+    });
   }
 
   async updateBooking(bookingId: string, updateData: Record<string, any>, userId: string, isAdmin = false) {

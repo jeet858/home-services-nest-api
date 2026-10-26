@@ -11,6 +11,7 @@ import { logger } from '../common/logger/logger';
 import { orNull } from '../common/utils/prisma-errors';
 import { pickFields, requireFields } from '../common/validation/model-input';
 import { normalizePhoneNumber } from '../common/validation/user.rules';
+import { Prisma } from '../generated/prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 
 const ADMIN_CREATE_FIELDS = { name: 'string', email: 'string', password: 'string', phoneNumber: 'string', avatar: 'string' } as const;
@@ -208,20 +209,31 @@ export class AdminService {
     }
   }
 
-  async getAllUsers(page = 1, limit = appConfig.pagination.defaultLimit) {
+  async getAllUsers(page = 1, limit = appConfig.pagination.defaultLimit, search?: string) {
     try {
-      logger.info('Fetching all users', { page, limit });
+      logger.info('Fetching all users', { page, limit, search });
 
+      const term = search?.trim();
+      const where: Prisma.UserWhereInput = {
+        role: 'client',
+        ...(term && {
+          OR: [
+            { name: { contains: term, mode: 'insensitive' } },
+            { email: { contains: term, mode: 'insensitive' } },
+            { phoneNumber: { contains: term } },
+          ],
+        }),
+      };
       const skip = (page - 1) * limit;
       const users = await this.prisma.user.findMany({
-        where: { role: 'client' },
+        where,
         omit: { password: true },
         orderBy: { createdAt: 'desc' },
         skip,
         take: limit,
       });
 
-      const total = await this.prisma.user.count({ where: { role: 'client' } });
+      const total = await this.prisma.user.count({ where });
 
       logger.info('Users fetched successfully', { count: users.length, total, page, limit });
 
@@ -306,6 +318,87 @@ export class AdminService {
       }
 
       throw new DatabaseError('Failed to delete user');
+    }
+  }
+
+  // Dashboard aggregates. Revenue counts completed or paid bookings, excluding cancelled ones.
+  async getStats() {
+    try {
+      const now = new Date();
+      const startOfToday = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+      const startOfTomorrow = new Date(startOfToday.getTime() + 86_400_000);
+      const seriesStart = new Date(startOfToday.getTime() - 29 * 86_400_000);
+      const revenueWhere: Prisma.BookingWhereInput = {
+        status: { not: 'cancelled' },
+        OR: [{ status: 'completed' }, { paymentStatus: 'paid' }],
+      };
+      const upcomingWhere: Prisma.BookingWhereInput = { status: { in: ['pending', 'confirmed'] }, date: { gte: startOfToday } };
+
+      const [
+        bookingsByStatus,
+        today,
+        upcoming,
+        unassignedUpcoming,
+        customers,
+        providersByStatus,
+        pendingRatings,
+        revenue,
+        recent,
+        topServiceRows,
+      ] = await Promise.all([
+        this.prisma.booking.groupBy({ by: ['status'], _count: { _all: true } }),
+        this.prisma.booking.count({ where: { date: { gte: startOfToday, lt: startOfTomorrow } } }),
+        this.prisma.booking.count({ where: upcomingWhere }),
+        this.prisma.booking.count({ where: { ...upcomingWhere, serviceProviderId: null } }),
+        this.prisma.user.count({ where: { role: 'client' } }),
+        this.prisma.serviceProvider.groupBy({ by: ['status'], _count: { _all: true } }),
+        this.prisma.rating.count({ where: { status: 'pending' } }),
+        this.prisma.booking.aggregate({ where: revenueWhere, _sum: { finalPrice: true, tip: true } }),
+        this.prisma.booking.findMany({
+          where: { createdAt: { gte: seriesStart } },
+          select: { createdAt: true, finalPrice: true, status: true, paymentStatus: true },
+        }),
+        this.prisma.service.findMany({
+          select: { id: true, name: true, _count: { select: { bookings: true } } },
+          orderBy: { bookings: { _count: 'desc' } },
+          take: 6,
+        }),
+      ]);
+
+      const dayKey = (d: Date) =>
+        `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+      const series = Array.from({ length: 30 }, (_, i) => {
+        const d = new Date(seriesStart.getTime() + i * 86_400_000);
+        return { date: dayKey(d), bookings: 0, revenue: 0 };
+      });
+      const byDay = new Map(series.map((point) => [point.date, point]));
+      for (const row of recent) {
+        const point = byDay.get(dayKey(row.createdAt));
+        if (!point) continue;
+        point.bookings += 1;
+        if (row.status !== 'cancelled' && (row.status === 'completed' || row.paymentStatus === 'paid')) {
+          point.revenue += row.finalPrice;
+        }
+      }
+
+      return {
+        totals: {
+          bookings: Object.fromEntries(bookingsByStatus.map((row) => [row.status, row._count._all])),
+          today,
+          upcoming,
+          unassignedUpcoming,
+          customers,
+          providers: Object.fromEntries(providersByStatus.map((row) => [row.status, row._count._all])),
+          pendingRatings,
+          revenue: revenue._sum.finalPrice ?? 0,
+          tips: revenue._sum.tip ?? 0,
+        },
+        series,
+        topServices: topServiceRows.map((row) => ({ id: row.id, name: row.name, bookings: row._count.bookings })),
+      };
+    } catch (error) {
+      logger.error('Error building admin stats', { error: error.message });
+      throw new DatabaseError('Failed to fetch stats');
     }
   }
 }
