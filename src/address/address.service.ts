@@ -20,7 +20,7 @@ const ADDRESS_FIELDS: FieldSpec = {
   lng: 'number',
 };
 
-// Optional coordinates; when sent they must be real WGS84 values.
+// Coordinates (the user's map pin) are required on create; whenever sent they must be real WGS84 values.
 function assertCoordinates(data: Record<string, any>) {
   if (data.lat != null && (data.lat < -90 || data.lat > 90)) {
     throw new ValidationError('Address validation failed: lat: must be between -90 and 90');
@@ -39,7 +39,7 @@ export class AddressService {
       logger.info('Creating new address', { userId });
 
       const data = pickFields(addressData, ADDRESS_FIELDS);
-      requireFields(data, ['street', 'city', 'state', 'zip', 'country'], 'Address');
+      requireFields(data, ['street', 'city', 'state', 'zip', 'country', 'lat', 'lng'], 'Address');
       assertCoordinates(data);
 
       const address = await this.prisma.address.create({ data: { ...(data as any), userId } });
