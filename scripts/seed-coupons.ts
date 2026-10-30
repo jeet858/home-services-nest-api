@@ -12,7 +12,7 @@ import { PrismaClient } from '../src/generated/prisma/client';
 const prisma = new PrismaClient({ adapter: new PrismaPg({ connectionString: process.env.DATABASE_URL }) });
 const inDays = (days: number) => new Date(Date.now() + days * 24 * 60 * 60 * 1000);
 
-const COUPONS = [
+export const COUPONS = [
   {
     code: 'SUBIDHA30',
     title: 'Special Monsoon',
@@ -63,9 +63,12 @@ async function main() {
   }
 }
 
-main()
-  .catch((err) => {
-    console.error(err);
-    process.exitCode = 1;
-  })
-  .finally(() => prisma.$disconnect());
+// Only run when invoked directly; seed-demo.ts imports COUPONS.
+if (require.main === module) {
+  main()
+    .catch((err) => {
+      console.error(err);
+      process.exitCode = 1;
+    })
+    .finally(() => prisma.$disconnect());
+}

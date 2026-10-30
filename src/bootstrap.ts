@@ -27,9 +27,20 @@ export async function createApp(): Promise<INestApplication> {
 
   app.use(helmet());
 
+  // Native mobile apps send no Origin; localhost (any port) is always allowed for local testing;
+  // the admin panel and other web origins come from ALLOWED_ORIGINS.
+  const allowedOrigins = (process.env.ALLOWED_ORIGINS ?? '')
+    .split(',')
+    .map((o) => o.trim().replace(/\/$/, ''))
+    .filter(Boolean);
+  const localhost = /^https?:\/\/(localhost|127\.0\.0\.1|10\.0\.2\.2)(:\d+)?$/;
+
   app.use(
     cors({
-      origin: process.env.NODE_ENV === 'production' ? process.env.ALLOWED_ORIGINS?.split(',') || [] : true,
+      origin:
+        process.env.NODE_ENV === 'production'
+          ? (origin, callback) => callback(null, !origin || localhost.test(origin) || allowedOrigins.includes(origin))
+          : true,
       methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
       allowedHeaders: ['Content-Type', 'Authorization'],
       credentials: true,
