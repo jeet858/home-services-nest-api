@@ -9,6 +9,7 @@ import { PaymentModule } from './payment/payment.module';
 import { RatingModule } from './rating/rating.module';
 import { ServiceProviderModule } from './service-provider/service-provider.module';
 import { ServiceModule } from './service/service.module';
+import { StorageModule } from './storage/storage.module';
 import { SubserviceModule } from './subservice/subservice.module';
 import { UserModule } from './user/user.module';
 import { PrismaModule } from './prisma/prisma.module';
@@ -29,6 +30,7 @@ import { PrismaModule } from './prisma/prisma.module';
     ServiceProviderModule,
     CouponModule,
     PaymentModule,
+    StorageModule,
   ],
 })
 export class AppModule {}
