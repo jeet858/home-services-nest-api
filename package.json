@@ -17,6 +17,8 @@
     "seed:coupons": "tsx scripts/seed-coupons.ts",
     "seed:demo": "tsx scripts/seed-demo.ts",
     "seed:demo:clean": "tsx scripts/seed-demo.ts --clean",
+    "e2e:quote": "tsx scripts/e2e-quote-flow.ts",
+    "e2e:assign": "tsx scripts/e2e-assignment.ts",
     "check:circular": "madge --circular --extensions ts --exclude generated src",
     "vercel-build": "prisma generate && nest build"
   },

@@ -21,7 +21,7 @@ export async function createApp(): Promise<INestApplication> {
   app.set('query parser', 'extended');
 
   // fix: behind Vercel's proxy every client shared the proxy IP, and so one rate-limit bucket.
-  if (process.env.VERCEL) {
+  if (process.env.VERCEL || process.env.TRUST_PROXY) {
     app.set('trust proxy', 1);
   }
 
@@ -51,7 +51,8 @@ export async function createApp(): Promise<INestApplication> {
   app.use(
     rateLimit({
       windowMs: 15 * 60 * 1000,
-      max: 100,
+      // Partner and customer apps poll every ~10s, and mobile carriers share IPs, so 100 was too tight.
+      max: Number(process.env.RATE_LIMIT_MAX) || 600,
       message: 'Too many requests from this IP, please try again later.',
     }),
   );

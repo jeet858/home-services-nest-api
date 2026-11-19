@@ -5,6 +5,7 @@ import { AdminGuard } from '../common/guards/admin.guard';
 import { JwtAuthGuard } from '../common/guards/jwt-auth.guard';
 import { logger } from '../common/logger/logger';
 import { assertUuid } from '../common/utils/ids';
+import { JobService } from '../job/job.service';
 import { ServiceProviderService } from '../service-provider/service-provider.service';
 import { BookingService } from './booking.service';
 
@@ -16,9 +17,47 @@ export class BookingController {
   constructor(
     private readonly bookingService: BookingService,
     private readonly serviceProviderService: ServiceProviderService,
+    private readonly jobService: JobService,
   ) {}
 
   // ---- User routes ----
+
+  // Quote review, negotiation and payment after the professional's inspection.
+
+  @Get('my-bookings/:id/quote')
+  async getQuote(@Req() req: Request, @Res() res: Response) {
+    assertUuid(req.params.id, 'booking');
+    const booking = await this.jobService.loadForCustomer(req.params.id as string, req.user!.id);
+    res.status(200).json({ status: 'success', data: this.jobService.customerQuoteView(booking) });
+  }
+
+  @Post('my-bookings/:id/quote/respond')
+  async respondToQuote(@Req() req: Request, @Res() res: Response) {
+    assertUuid(req.params.id, 'booking');
+    const quote = await this.jobService.customerRespond(req.params.id as string, req.user!.id, req.body);
+    res.status(200).json({ status: 'success', data: quote });
+  }
+
+  @Post('my-bookings/:id/pay/order')
+  async createQuoteOrder(@Req() req: Request, @Res() res: Response) {
+    assertUuid(req.params.id, 'booking');
+    const order = await this.jobService.createQuoteOrder(req.params.id as string, req.user!.id);
+    res.status(201).json({ status: 'success', data: order });
+  }
+
+  @Post('my-bookings/:id/pay/verify')
+  async verifyQuotePayment(@Req() req: Request, @Res() res: Response) {
+    assertUuid(req.params.id, 'booking');
+    const quote = await this.jobService.verifyQuotePayment(req.params.id as string, req.user!.id, req.body);
+    res.status(200).json({ status: 'success', data: quote });
+  }
+
+  @Post('my-bookings/:id/pay/cash')
+  async chooseCash(@Req() req: Request, @Res() res: Response) {
+    assertUuid(req.params.id, 'booking');
+    const quote = await this.jobService.chooseCash(req.params.id as string, req.user!.id);
+    res.status(200).json({ status: 'success', data: quote });
+  }
 
   @Get('my-bookings')
   async getUserBookings(@Req() req: Request, @Res() res: Response) {

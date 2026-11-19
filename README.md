@@ -65,6 +65,58 @@ scripts/                 Mongo -> Postgres migration
 api/index.js             Vercel entry
 ```
 
+## Automatic assignment
+
+A booking is offered to one professional at a time (`src/assignment/`). They have 2 minutes to accept; on a decline or timeout it moves to the next.
+
+Who is eligible:
+
+- active, online and seen in the last 20 minutes
+- offers one of the booking's services, and works that weekday and hour
+- has a known location within the last search ring (20 km) of the address
+- holds no other open offer, and has no other job within 90 minutes of the slot
+- has not declined or dropped this booking; a professional whose offer timed out can be asked again after 10 minutes
+
+Who is picked: the search uses the smallest ring (5, 10, then 20 km) that contains an eligible professional, then takes the highest score in that ring:
+
+| Factor | Weight | Meaning |
+|---|---|---|
+| Distance | 0.40 | closer to the address within the ring |
+| Rating | 0.20 | average rating, smoothed so one review does not decide it |
+| Acceptance | 0.15 | share of offers accepted in the last 30 days |
+| Workload | 0.15 | fewer jobs already booked that day |
+| Fairness | 0.10 | longer since their last offer |
+
+The distance and score of every offer are stored on `BookingAssignment` and shown in the admin panel.
+
+If nobody in range is left, 6 offers have been made, or the booking has waited 15 minutes, `Booking.matchEscalatedAt` is set once. The customer is told the search is taking longer and the admin panel marks the booking "Needs manual assignment". Matching keeps trying in the meantime.
+
+The numbers above are defaults in `src/assignment/assignment.config.ts`; the `ASSIGN_*` variables in `.env.example` override them.
+
+The partner app reports its position with `PATCH /api/partner/me/location` while online, so distance uses where the professional is now.
+
+### Scheduler
+
+Vercel functions only run during a request, so something has to call the matcher when no app is polling. Without it an expired offer is not moved on until the customer or a professional next opens their app.
+
+Set `CRON_SECRET` in the Vercel project, then have an external scheduler call this every minute:
+
+```
+GET https://<your-api>/api/cron/assignments
+Authorization: Bearer <CRON_SECRET>
+```
+
+It expires lapsed offers, retries waiting bookings and flags the ones that have waited too long. Two free options:
+
+- **cron-job.org**: create a job with the URL above, schedule "every 1 minute", and add the `Authorization` header under Advanced.
+- **GitHub Actions**: a workflow with `on: schedule: - cron: '*/5 * * * *'` that runs `curl -H "Authorization: Bearer $CRON_SECRET" <url>`. GitHub's shortest interval is 5 minutes and runs can be delayed, so prefer cron-job.org.
+
+## Place search
+
+`GET /api/geo/search?q=&lat=&lng=` and `GET /api/geo/reverse?lat=&lng=` back the customer app's address form (`src/geo/`). They proxy [Photon](https://photon.komoot.io) (OpenStreetMap data), limited to India, and return one shape: `{ title, subtitle, lat, lng, street, city, state, zip }`.
+
+The public Photon server is free and has no key, but it is a shared service with no uptime promise. If search traffic grows, host Photon yourself and set `GEO_PHOTON_URL`. The apps never call the provider directly, so it can be replaced in `geo.service.ts` alone.
+
 ## Deploying to Vercel
 
 Create a Vercel project pointing at this folder (push it to its own repo first). `vercel.json` builds with `npm run vercel-build` and serves every path from `api/index.js`, in region `bom1` with maxDuration 30s.
@@ -76,4 +128,12 @@ Set `DATABASE_URL` to a **pooled** connection string. If migrations need a separ
 ```bash
 npm run build
 npm run check:circular        # madge: no circular imports
+```
+
+End-to-end checks run against a running API and a **local** Postgres (they refuse any other database):
+
+```bash
+# API: NODE_ENV=development PAYMENT_MOCK=true OTP_DEV_ECHO=true CRON_SECRET=e2e DATABASE_URL=<local> npm start
+npm run e2e:quote             # booking -> offer -> quote -> payment -> completion
+npm run e2e:assign            # matching rules, escalation, cron, place search (needs CRON_SECRET=e2e)
 ```

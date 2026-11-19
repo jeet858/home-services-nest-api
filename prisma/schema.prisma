@@ -17,11 +17,73 @@ enum Role {
   admin
 }
 
+/// Lifecycle of a booking. `pending`/`confirmed` are legacy values kept for old rows.
 enum BookingStatus {
   pending
   confirmed
   completed
   cancelled
+  searching // visit charge paid, looking for a professional
+  offered // offered to a professional, awaiting accept/reject
+  accepted // professional accepted
+  on_the_way
+  arrived
+  inspecting // service OTP verified, professional building the quote
+  quote_sent // customer reviewing / negotiating
+  payment_pending // every task agreed; waiting for online payment or cash confirmation
+  in_progress // paid; work under way
+}
+
+enum OtpPurpose {
+  customer
+  provider
+}
+
+enum DocumentStatus {
+  not_added
+  pending
+  verified
+  rejected
+}
+
+enum BookingItemStatus {
+  booked // on the original booking, not yet in a quote
+  proposed // in a sent quote, awaiting the customer
+  accepted
+  rejected // rejected by the customer
+  countered // last offer is a counter waiting for the other side
+  declined // declined by the professional during negotiation
+  not_needed // marked by the professional at inspection
+}
+
+enum NegotiationParty {
+  provider
+  customer
+}
+
+enum AssignmentStatus {
+  offered
+  accepted
+  rejected
+  expired
+  cancelled
+}
+
+enum PaymentKind {
+  visit
+  quote
+}
+
+enum RecipientType {
+  user
+  provider
+}
+
+enum PayoutStatus {
+  scheduled
+  processing
+  paid
+  failed
 }
 
 enum RatingStatus {
@@ -61,15 +123,15 @@ enum PaymentStatus {
 
 /// App users: OTP clients and admins share one table, as in Mongo.
 model User {
-  id          String   @id @default(uuid()) @db.Uuid
-  phoneNumber String   @unique
+  id          String    @id @default(uuid()) @db.Uuid
+  phoneNumber String    @unique
   name        String?
   email       String?
   password    String
   avatar      String?
-  role        Role     @default(client)
+  role        Role      @default(client)
   lastLogin   DateTime? // fix: was written by admin login but missing from the Mongo schema
-  createdAt   DateTime @default(now())
+  createdAt   DateTime  @default(now())
 
   addresses         Address[]
   bookings          Booking[]         @relation("BookingUser")
@@ -85,12 +147,14 @@ model User {
 
 /// Short-lived login OTPs.
 model Otp {
-  id          String   @id @default(uuid()) @db.Uuid
+  id          String     @id @default(uuid()) @db.Uuid
   phoneNumber String
   otp         String
   expiresAt   DateTime
+  purpose     OtpPurpose @default(customer)
+  attempts    Int        @default(0)
 
-  @@index([phoneNumber])
+  @@index([phoneNumber, purpose])
 }
 
 /// User addresses (replaces the never-maintained User.addresses array).
@@ -152,6 +216,7 @@ model Subservice {
   bookings  Booking[]         @relation("BookingSubservices")
   providers ServiceProvider[] @relation("ProviderSubservices")
   ratings   Rating[]
+  items     BookingItem[]
 
   @@index([serviceId, createdAt])
 }
@@ -183,15 +248,42 @@ model Booking {
   startedAt          DateTime?
   completedAt        DateTime?
   createdAt          DateTime      @default(now())
+  // Set once when auto-matching could not place the booking; the admin team assigns by hand.
+  matchEscalatedAt   DateTime?
 
-  user            User             @relation("BookingUser", fields: [userId], references: [id], onDelete: Cascade)
-  address         Address?         @relation(fields: [addressId], references: [id], onDelete: SetNull)
-  serviceProvider ServiceProvider? @relation(fields: [serviceProviderId], references: [id], onDelete: SetNull)
-  assignedBy      User?            @relation("BookingAssignedBy", fields: [assignedById], references: [id], onDelete: SetNull)
-  services        Service[]        @relation("BookingServices")
-  subservices     Subservice[]     @relation("BookingSubservices")
+  // Visit -> inspection -> quote -> payment -> work timeline.
+  onTheWayAt       DateTime?
+  arrivedAt        DateTime?
+  inspectionAt     DateTime?
+  otpAttempts      Int       @default(0)
+  quoteRound       Int       @default(0)
+  quoteSentAt      DateTime?
+  quoteApprovedAt  DateTime?
+  quoteNote        String?
+  issuePhotos      String[]
+  afterPhotos      String[]
+  cashConfirmedAt  DateTime?
+  // Money. finalPrice stays "what the customer pays in total" once a quote is agreed.
+  visitingCharge   Float     @default(0)
+  visitChargePaid  Boolean   @default(false)
+  estimatedTotal   Float     @default(0)
+  agreedTotal      Float?
+  commissionPct    Float?
+  commissionAmount Float?
+  providerEarning  Float?
+
+  user            User                @relation("BookingUser", fields: [userId], references: [id], onDelete: Cascade)
+  address         Address?            @relation(fields: [addressId], references: [id], onDelete: SetNull)
+  serviceProvider ServiceProvider?    @relation(fields: [serviceProviderId], references: [id], onDelete: SetNull)
+  assignedBy      User?               @relation("BookingAssignedBy", fields: [assignedById], references: [id], onDelete: SetNull)
+  services        Service[]           @relation("BookingServices")
+  subservices     Subservice[]        @relation("BookingSubservices")
   ratings         Rating[]
+  items           BookingItem[]
+  assignments     BookingAssignment[]
+  payments        Payment[]
 
+  @@index([status, createdAt])
   @@index([userId, createdAt])
   @@index([serviceProviderId, status])
   @@index([createdAt])
@@ -272,9 +364,17 @@ model ServiceProvider {
   verifiedById          String?        @db.Uuid
   verifiedAt            DateTime?
   notes                 String?
+  // Partner app presence.
+  isOnline              Boolean        @default(false)
+  lastSeenAt            DateTime?
+  lat                   Float?
+  lng                   Float?
+  fcmToken              String?
   createdAt             DateTime       @default(now())
   updatedAt             DateTime       @updatedAt
 
+  assignments    BookingAssignment[]
+  payouts        Payout[]
   services       Service[]               @relation("ProviderServices")
   subservices    Subservice[]            @relation("ProviderSubservices")
   certifications ProviderCertification[]
@@ -285,6 +385,7 @@ model ServiceProvider {
   verifiedBy     User?                   @relation("ProviderVerifiedBy", fields: [verifiedById], references: [id], onDelete: SetNull)
 
   @@index([status])
+  @@index([status, isOnline])
   @@index([ratingAverage(sort: Desc), ratingTotal(sort: Desc)])
   @@index([createdAt(sort: Desc)])
 }
@@ -306,13 +407,15 @@ model ProviderCertification {
 
 /// Was ServiceProvider.documents[] in Mongo.
 model ProviderDocument {
-  id         String   @id @default(uuid()) @db.Uuid
-  providerId String   @db.Uuid
-  type       String
-  name       String
-  url        String
-  uploadedAt DateTime @default(now())
-  verified   Boolean  @default(false)
+  id           String         @id @default(uuid()) @db.Uuid
+  providerId   String         @db.Uuid
+  type         String
+  name         String
+  url          String
+  uploadedAt   DateTime       @default(now())
+  verified     Boolean        @default(false)
+  status       DocumentStatus @default(pending)
+  rejectReason String?
 
   provider ServiceProvider @relation(fields: [providerId], references: [id], onDelete: Cascade)
 
@@ -336,4 +439,120 @@ model Coupon {
   createdAt    DateTime   @default(now())
 
   @@index([active, validTill])
+}
+
+/// One task on a booking: booked from the catalogue, or added by the professional at inspection.
+model BookingItem {
+  id           String            @id @default(uuid()) @db.Uuid
+  bookingId    String            @db.Uuid
+  subserviceId String?           @db.Uuid
+  name         String
+  description  String?
+  qty          Int               @default(1)
+  catalogPrice Float // unit price from the catalogue at booking time (0 for custom tasks)
+  price        Float // unit price currently on the table
+  finalPrice   Float? // agreed unit price, set when accepted
+  isAdditional Boolean           @default(false)
+  reason       String? // why the professional changed the price
+  status       BookingItemStatus @default(booked)
+  done         Boolean           @default(false)
+  sortOrder    Int               @default(0)
+  createdAt    DateTime          @default(now())
+
+  booking      Booking           @relation(fields: [bookingId], references: [id], onDelete: Cascade)
+  subservice   Subservice?       @relation(fields: [subserviceId], references: [id], onDelete: SetNull)
+  negotiations ItemNegotiation[]
+
+  @@index([bookingId, sortOrder])
+}
+
+/// One offer on a task. Round 1 is the professional's quote; at most 3 rounds.
+model ItemNegotiation {
+  id        String           @id @default(uuid()) @db.Uuid
+  itemId    String           @db.Uuid
+  round     Int
+  by        NegotiationParty
+  price     Float
+  note      String?
+  createdAt DateTime         @default(now())
+
+  item BookingItem @relation(fields: [itemId], references: [id], onDelete: Cascade)
+
+  @@index([itemId, round])
+}
+
+/// A time-boxed offer of a booking to one professional.
+model BookingAssignment {
+  id          String           @id @default(uuid()) @db.Uuid
+  bookingId   String           @db.Uuid
+  providerId  String           @db.Uuid
+  status      AssignmentStatus @default(offered)
+  expiresAt   DateTime
+  respondedAt DateTime?
+  reason      String?
+  // Why this professional was picked: distance to the address and the match score (0..1).
+  distanceKm  Float?
+  score       Float?
+  createdAt   DateTime         @default(now())
+
+  booking  Booking         @relation(fields: [bookingId], references: [id], onDelete: Cascade)
+  provider ServiceProvider @relation(fields: [providerId], references: [id], onDelete: Cascade)
+
+  @@index([providerId, status])
+  @@index([bookingId, status])
+  @@index([status, expiresAt])
+}
+
+/// Money received against a booking: the visit charge, then the agreed quote.
+model Payment {
+  id                String        @id @default(uuid()) @db.Uuid
+  bookingId         String?       @db.Uuid
+  userId            String        @db.Uuid
+  kind              PaymentKind
+  method            PaymentMethod
+  amount            Float
+  status            PaymentStatus @default(pending)
+  razorpayOrderId   String?       @unique
+  razorpayPaymentId String?
+  paidAt            DateTime?
+  createdAt         DateTime      @default(now())
+
+  booking Booking? @relation(fields: [bookingId], references: [id], onDelete: SetNull)
+
+  @@index([bookingId])
+  @@index([userId, kind, status])
+}
+
+/// In-app inbox for customers and professionals.
+model Notification {
+  id            String        @id @default(uuid()) @db.Uuid
+  recipientType RecipientType
+  recipientId   String        @db.Uuid
+  type          String
+  title         String
+  body          String
+  bookingId     String?       @db.Uuid
+  data          Json?
+  readAt        DateTime?
+  createdAt     DateTime      @default(now())
+
+  @@index([recipientType, recipientId, createdAt(sort: Desc)])
+  @@index([recipientType, recipientId, readAt])
+}
+
+/// Settlement of a professional's earnings to their bank account.
+model Payout {
+  id          String       @id @default(uuid()) @db.Uuid
+  providerId  String       @db.Uuid
+  amount      Float
+  periodStart DateTime
+  periodEnd   DateTime
+  status      PayoutStatus @default(scheduled)
+  utr         String?
+  paidAt      DateTime?
+  createdAt   DateTime     @default(now())
+
+  provider ServiceProvider @relation(fields: [providerId], references: [id], onDelete: Cascade)
+
+  @@index([providerId, createdAt(sort: Desc)])
 }
