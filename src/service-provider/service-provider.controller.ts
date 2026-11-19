@@ -540,4 +540,18 @@ export class ServiceProviderController {
       if (!sendKnownError(res, error, [NotFoundError])) throw error;
     }
   }
+
+  @Put(':providerId/documents/:documentId')
+  async reviewDocument(@Req() req: Request, @Res() res: Response) {
+    const { providerId, documentId } = req.params;
+    assertUuid(providerId, 'service provider');
+    assertUuid(documentId, 'document');
+    const document = await this.serviceProviderService.reviewDocument(
+      providerId as string,
+      documentId as string,
+      req.body?.status,
+      req.body?.reason,
+    );
+    res.status(200).json({ success: true, data: { document } });
+  }
 }

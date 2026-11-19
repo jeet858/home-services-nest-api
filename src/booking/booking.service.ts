@@ -16,6 +16,9 @@ import { isUuid } from '../common/utils/ids';
 import { FieldSpec, pickFields, requireFields } from '../common/validation/model-input';
 import { Prisma } from '../generated/prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
+import { AssignmentService } from '../assignment/assignment.service';
+import { NotificationService } from '../notification/notification.service';
+import { ALL_STATUSES, VISIT_CHARGE } from './booking-status';
 
 const SUMMARY = { select: { id: true, name: true, description: true } };
 const PRICED = { select: { id: true, name: true, description: true, originalPrice: true, discountedPrice: true } };
@@ -33,6 +36,7 @@ const PROVIDER_SUMMARY = {
     ratingCount3: true,
     ratingCount4: true,
     ratingCount5: true,
+    passportPhoto: true,
   },
 };
 // Subservice `price` was selected but never existed, so only real fields are returned.
@@ -43,10 +47,31 @@ const FULL_INCLUDE = {
   address: true,
   serviceProvider: PROVIDER_SUMMARY,
   assignedBy: { select: { id: true, name: true } },
+  items: { orderBy: [{ sortOrder: 'asc' }, { createdAt: 'asc' }], include: { negotiations: { orderBy: { round: 'asc' } } } },
+  payments: { where: { status: 'paid' }, orderBy: { createdAt: 'asc' } },
+  assignments: { select: { status: true, createdAt: true }, orderBy: { createdAt: 'asc' } },
+} satisfies Prisma.BookingInclude;
+// Admin detail: who was offered the booking, how far away they were and how each offer ended.
+const ADMIN_INCLUDE = {
+  ...FULL_INCLUDE,
+  assignments: {
+    select: {
+      id: true,
+      status: true,
+      createdAt: true,
+      expiresAt: true,
+      respondedAt: true,
+      reason: true,
+      distanceKm: true,
+      score: true,
+      provider: { select: { id: true, name: true, phoneNumber: true } },
+    },
+    orderBy: { createdAt: 'asc' },
+  },
 } satisfies Prisma.BookingInclude;
 const EDIT_INCLUDE = { services: SUMMARY, subservices: SUMMARY, address: true } satisfies Prisma.BookingInclude;
 
-const STATUSES = ['pending', 'confirmed', 'completed', 'cancelled'];
+const STATUSES: readonly string[] = ALL_STATUSES;
 const USER_FIELDS: FieldSpec = {
   addressId: 'string',
   date: 'date',
@@ -76,7 +101,15 @@ export class BookingService {
     private readonly emailService: EmailService,
     private readonly couponService: CouponService,
     private readonly paymentService: PaymentService,
+    private readonly assignments: AssignmentService,
+    private readonly notifications: NotificationService,
   ) {}
+
+  /** Adds `reassigning` (a previous professional dropped out and matching restarted) for the tracking screen. */
+  private withMatching<T extends { status: string; assignments?: { status: string }[] }>(booking: T) {
+    const dropped = (booking.assignments ?? []).some((a) => ['rejected', 'expired', 'cancelled'].includes(a.status));
+    return { ...booking, reassigning: dropped && ['searching', 'offered'].includes(booking.status) };
+  }
 
   // Same existence checks as before; non-UUID ids count as "not found" (Mongo cast errors became 500s).
   private async assertServiceIds(services: any) {
@@ -100,7 +133,7 @@ export class BookingService {
   }
 
   // Body fields -> Prisma data, with the enum/FK checks Mongoose validators or refs used to cover.
-  private async toBookingData(input: Record<string, any>, isAdmin: boolean) {
+  private async toBookingData(input: Record<string, any>, isAdmin: boolean, ownerId?: string) {
     const data: Record<string, any> = pickFields(input, isAdmin ? ADMIN_FIELDS : USER_FIELDS);
 
     if (data.status !== undefined && !STATUSES.includes(data.status)) {
@@ -113,8 +146,10 @@ export class BookingService {
     for (const [field, label] of [['addressId', 'address'], ['serviceProviderId', 'service provider'], ['assignedById', 'user']]) {
       if (data[field] && !isUuid(data[field])) throw new ValidationError(`Invalid ${label} id`);
     }
-    if (data.addressId && !(await this.prisma.address.findUnique({ where: { id: data.addressId }, select: { id: true } }))) {
-      throw new NotFoundError('Address not found');
+    if (data.addressId) {
+      const address = await this.prisma.address.findUnique({ where: { id: data.addressId }, select: { userId: true } });
+      // Someone else's address is reported the same way as a missing one.
+      if (!address || (ownerId && address.userId !== ownerId)) throw new NotFoundError('Address not found');
     }
     return data;
   }
@@ -182,7 +217,7 @@ export class BookingService {
     try {
       logger.info('Admin: Fetching booking by ID', { bookingId });
 
-      const booking = await this.prisma.booking.findUnique({ where: { id: bookingId }, include: FULL_INCLUDE });
+      const booking = await this.prisma.booking.findUnique({ where: { id: bookingId }, include: ADMIN_INCLUDE });
 
       if (!booking) {
         logger.warn('Booking not found', { bookingId });
@@ -219,7 +254,7 @@ export class BookingService {
       });
 
       // Each booking carries its rating (or null), as the original attached from a lookup map.
-      const bookings = rows.map(({ ratings, ...booking }) => ({ ...booking, rating: ratings[0] ?? null }));
+      const bookings = rows.map(({ ratings, ...booking }) => ({ ...this.withMatching(booking), rating: ratings[0] ?? null }));
 
       const total = await this.prisma.booking.count({ where: { userId } });
 
@@ -236,6 +271,8 @@ export class BookingService {
     try {
       logger.info('User: Fetching user booking', { userId, bookingId });
 
+      // Lazy expiry: a poll from the tracking screen moves a lapsed offer on.
+      await this.assignments.sweepExpired({ bookingId });
       const booking = await this.prisma.booking.findFirst({ where: { id: bookingId, userId }, include: FULL_INCLUDE });
 
       if (!booking) {
@@ -244,7 +281,7 @@ export class BookingService {
       }
 
       logger.info('User: Booking fetched successfully', { userId, bookingId });
-      return booking;
+      return this.withMatching(booking);
     } catch (error) {
       logger.error('Error fetching user booking', { error: error.message, userId, bookingId });
 
@@ -257,13 +294,15 @@ export class BookingService {
   }
 
   async createBooking(bookingData: Record<string, any>, userId: string) {
+    // Current apps send priced line items and a paid visit charge; older installs keep the legacy path.
+    if (Array.isArray(bookingData.items)) return this.createQuotedBooking(bookingData, userId);
     try {
       logger.info('User: Creating new booking', { userId });
 
       await this.assertServiceIds(bookingData.services);
       await this.assertSubserviceIds(bookingData.subservices);
 
-      const data = await this.toBookingData(bookingData, false);
+      const data = await this.toBookingData(bookingData, false, userId);
       requireFields(data, ['date', 'time', 'finalPrice'], 'Booking');
 
       // Re-validate the applied coupon so the discount can't be inflated client-side.
@@ -316,6 +355,87 @@ export class BookingService {
 
       throw new DatabaseError('Failed to create booking');
     }
+  }
+
+  /**
+   * New flow: items with quantities at catalogue price, a paid visit charge, then auto-assignment.
+   * The final price is agreed after the professional inspects, so nothing else is charged now.
+   */
+  private async createQuotedBooking(body: Record<string, any>, userId: string) {
+    const lines: { subserviceId: string; qty: number }[] = body.items.map((i: any) => ({
+      subserviceId: String(i?.subserviceId ?? i?.id ?? ''),
+      qty: Math.max(1, Math.min(50, Math.round(Number(i?.qty) || 1))),
+    }));
+    if (!lines.length || lines.length > 30) throw new ValidationError('Add between 1 and 30 services');
+    if (!lines.every((l) => isUuid(l.subserviceId))) throw new ValidationError('Invalid subservice id');
+
+    const subs = await this.prisma.subservice.findMany({ where: { id: { in: lines.map((l) => l.subserviceId) } } });
+    if (new Set(subs.map((s) => s.id)).size !== new Set(lines.map((l) => l.subserviceId)).size) {
+      throw new NotFoundError('One or more services not found');
+    }
+    const byId = new Map(subs.map((s) => [s.id, s]));
+
+    const data = await this.toBookingData(body, false, userId);
+    requireFields(data, ['date', 'time', 'addressId'], 'Booking');
+    const estimate = Math.round(lines.reduce((sum, l) => sum + byId.get(l.subserviceId)!.discountedPrice * l.qty, 0) * 100) / 100;
+
+    let discount = 0;
+    let couponCode: string | null = null;
+    if (body.couponCode) {
+      const result = await this.couponService.validate(body.couponCode, estimate, userId);
+      discount = result.discount;
+      couponCode = result.coupon.code;
+    }
+
+    // The visit charge must be a verified, unused order from POST /api/payments/order { kind: 'visit' }.
+    const { razorpayOrderId, razorpayPaymentId, razorpaySignature } = body;
+    const visit = await this.prisma.payment.findFirst({ where: { razorpayOrderId: String(razorpayOrderId ?? ''), userId, kind: 'visit' } });
+    if (!visit) throw new ValidationError('Pay the visit charge to confirm the booking');
+    if (visit.bookingId) throw new ValidationError('This payment is already linked to a booking');
+    this.paymentService.verify(razorpayOrderId, razorpayPaymentId, razorpaySignature);
+
+    const booking = await this.prisma.$transaction(async (tx) => {
+      const created = await tx.booking.create({
+        data: {
+          userId,
+          addressId: data.addressId,
+          date: data.date,
+          time: data.time,
+          notes: data.notes ?? null,
+          status: 'searching',
+          estimatedTotal: estimate,
+          finalPrice: Math.max(VISIT_CHARGE, estimate - discount),
+          discount,
+          couponCode,
+          visitingCharge: VISIT_CHARGE,
+          visitChargePaid: true,
+          paymentMethod: 'online',
+          paymentStatus: 'pending',
+          serviceOtp: String(randomInt(1000, 10000)),
+          services: { connect: [...new Set(subs.map((s) => s.serviceId))].map((id) => ({ id })) },
+          subservices: { connect: subs.map((s) => ({ id: s.id })) },
+          items: {
+            create: lines.map((l, i) => {
+              const s = byId.get(l.subserviceId)!;
+              return { subserviceId: s.id, name: s.name, description: s.description, qty: l.qty, catalogPrice: s.discountedPrice, price: s.discountedPrice, sortOrder: i };
+            }),
+          },
+        },
+        include: { ...EDIT_INCLUDE, items: true, user: { select: { name: true, email: true, phoneNumber: true } } },
+      });
+      await tx.payment.update({
+        where: { id: visit.id },
+        data: { bookingId: created.id, status: 'paid', razorpayPaymentId: String(razorpayPaymentId), paidAt: new Date() },
+      });
+      return created;
+    });
+
+    logger.info('User: Booking created (quote flow)', { bookingId: booking.id, userId, estimate });
+    void this.emailService.sendBookingCreated(booking as any);
+    await this.assignments.assignNext(booking.id);
+
+    const { user, ...created } = booking;
+    return created;
   }
 
   async addTip(bookingId: string, amount: any, userId: string) {
@@ -381,7 +501,7 @@ export class BookingService {
         throw new AuthenticationError('Not authorized to update this booking');
       }
 
-      const data = await this.toBookingData(updateData, isAdmin);
+      const data = await this.toBookingData(updateData, isAdmin, existingBooking.userId);
       // $set accepted these arrays too; FKs now require the ids to exist.
       if (updateData.services !== undefined) await this.assertServiceIds(updateData.services);
       if (updateData.subservices !== undefined) await this.assertSubserviceIds(updateData.subservices);
@@ -502,6 +622,10 @@ export class BookingService {
         throw new ValidationError('Cannot cancel a completed booking');
       }
 
+      if (['inspecting', 'quote_sent', 'payment_pending', 'in_progress'].includes(existingBooking.status)) {
+        throw new ValidationError('The professional is already at your place. Contact support to cancel.');
+      }
+
       const booking = await this.prisma.booking.update({
         where: { id: bookingId },
         data: {
@@ -511,6 +635,14 @@ export class BookingService {
         },
         include: EDIT_INCLUDE,
       });
+
+      await this.assignments.withdraw(bookingId);
+      if (existingBooking.serviceProviderId) {
+        await this.notifications.notify(
+          { type: 'provider', id: existingBooking.serviceProviderId },
+          { type: 'booking_cancelled', title: 'Booking cancelled by customer', body: 'This job has been removed from your schedule.', bookingId },
+        );
+      }
 
       logger.info('User: Booking cancelled successfully', { bookingId, userId });
       return booking;

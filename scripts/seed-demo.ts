@@ -234,6 +234,11 @@ async function seed() {
             ]),
           ),
           status: p.status,
+          // Spread around central Kolkata and online, so auto-assignment has someone to offer to.
+          lat: 22.5726 + ((i % 5) - 2) * 0.018,
+          lng: 88.3639 + ((i % 3) - 1) * 0.02,
+          isOnline: p.status === 'active',
+          lastSeenAt: p.status === 'active' ? new Date() : null,
           bankAccountNumber: `5010010${String(100000 + i)}`,
           bankIfscCode: 'HDFC0000123',
           bankAccountHolderName: p.name,

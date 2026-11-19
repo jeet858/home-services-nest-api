@@ -9,10 +9,15 @@ import { PaymentService } from './payment.service';
 export class PaymentController {
   constructor(private readonly paymentService: PaymentService) {}
 
+  // { kind: 'visit' } creates the fixed visit-charge order for a new booking.
+  // Without a kind it keeps the legacy behaviour (client-supplied amount) for older app versions.
   @Post('order')
   async createOrder(@Req() req: Request, @Res() res: Response) {
-    logger.info('Creating payment order', { userId: req.user.id });
-    const order = await this.paymentService.createOrder(req.body.amount, req.user.id);
+    logger.info('Creating payment order', { userId: req.user!.id, kind: req.body?.kind });
+    const order =
+      req.body?.kind === 'visit'
+        ? await this.paymentService.createVisitOrder(req.user!.id)
+        : await this.paymentService.createOrder(req.body.amount, req.user!.id);
     res.status(201).json({ status: 'success', data: order });
   }
 

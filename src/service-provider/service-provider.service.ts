@@ -4,6 +4,8 @@ import { logger } from '../common/logger/logger';
 import { isUuid } from '../common/utils/ids';
 import { requireFields } from '../common/validation/model-input';
 import { Prisma } from '../generated/prisma/client';
+import { ACTIVE_WITH_PRO } from '../booking/booking-status';
+import { NotificationService } from '../notification/notification.service';
 import { PrismaService } from '../prisma/prisma.service';
 import {
   applyRatingStats,
@@ -30,7 +32,29 @@ const NO_MATCH = { id: { in: [] as string[] } };
 
 @Injectable()
 export class ServiceProviderService {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly notifications: NotificationService,
+  ) {}
+
+  /** Admin review of a document the professional uploaded from the partner app. */
+  async reviewDocument(providerId: string, documentId: string, status: unknown, reason: unknown) {
+    if (status !== 'verified' && status !== 'rejected') throw new ValidationError('Status must be verified or rejected');
+    const doc = await this.prisma.providerDocument.findFirst({ where: { id: documentId, providerId } });
+    if (!doc) throw new NotFoundError('Document not found');
+    const rejectReason = status === 'rejected' && typeof reason === 'string' && reason.trim() ? reason.trim().slice(0, 300) : null;
+    const updated = await this.prisma.providerDocument.update({
+      where: { id: doc.id },
+      data: { status, verified: status === 'verified', rejectReason },
+    });
+    await this.notifications.notify(
+      { type: 'provider', id: providerId },
+      status === 'verified'
+        ? { type: 'document_verified', title: `${doc.name} verified`, body: 'Your document was approved.' }
+        : { type: 'document_rejected', title: `${doc.name} needs another upload`, body: rejectReason ?? 'Please upload a clearer copy.' },
+    );
+    return updated;
+  }
 
   private async findOrThrow(providerId: string) {
     const serviceProvider = await this.prisma.serviceProvider.findUnique({ where: { id: providerId } });
@@ -237,7 +261,7 @@ export class ServiceProviderService {
       await this.findOrThrow(providerId);
 
       const activeBookings = await this.prisma.booking.count({
-        where: { serviceProviderId: providerId, status: { in: ['pending', 'confirmed'] } },
+        where: { serviceProviderId: providerId, status: { in: ACTIVE_WITH_PRO as any } },
       });
 
       if (activeBookings > 0) {
@@ -389,15 +413,26 @@ export class ServiceProviderService {
 
       await this.findOrThrow(providerId);
 
-      const booking = await this.prisma.booking.findUnique({ where: { id: bookingId }, select: { id: true } });
+      const booking = await this.prisma.booking.findUnique({ where: { id: bookingId }, select: { id: true, status: true } });
       if (!booking) {
         throw new NotFoundError('Booking not found');
       }
 
-      const updated = await this.prisma.booking.update({
-        where: { id: bookingId },
-        data: { serviceProviderId: providerId, assignedAt: new Date(), assignedById: adminId },
-      });
+      // A quote-flow booking still being matched becomes accepted by the chosen professional.
+      const matching = booking.status === 'searching' || booking.status === 'offered';
+      const [, updated] = await this.prisma.$transaction([
+        this.prisma.bookingAssignment.updateMany({
+          where: { bookingId, status: 'offered' },
+          data: { status: 'cancelled', respondedAt: new Date(), reason: 'Assigned by admin' },
+        }),
+        this.prisma.booking.update({
+          where: { id: bookingId },
+          data: { serviceProviderId: providerId, assignedAt: new Date(), assignedById: adminId, matchEscalatedAt: null, ...(matching ? { status: 'accepted' as const } : {}) },
+        }),
+        ...(matching
+          ? [this.prisma.bookingAssignment.create({ data: { bookingId, providerId, status: 'accepted', expiresAt: new Date(), respondedAt: new Date(), reason: 'Assigned by admin' } })]
+          : []),
+      ]);
 
       logger.info('Service provider assigned to booking successfully', { providerId, bookingId });
 
